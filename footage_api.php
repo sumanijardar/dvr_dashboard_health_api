@@ -1,20 +1,23 @@
 <?php
 // ==============================================================================
 // Footage Availability Report APIs (GET Method)
+// Table: footage_availability_report (id, ip, footage_dt_from, footage_dt_to, status, remark, udate)
 // ==============================================================================
 
 include('config.php');
 
 // ==============================================================================
-// 1. Footage Status Summary Counts
+// 1. Footage Status & Remark Summary Counts
 // URL: api/footage_api.php?fetch_footage_counts=1
 // ==============================================================================
 
 if ($_SERVER['REQUEST_METHOD'] === 'GET' && isset($_GET['fetch_footage_counts'])) {
 
-    // 1. Get overall total count
+    // 1. Get overall total count and distinct IP count
     $total_query = "
-        SELECT COUNT(id) AS total_count
+        SELECT
+            COUNT(id) AS total_count,
+            COUNT(DISTINCT ip) AS distinct_ips
         FROM `footage_availability_report`
     ";
 
@@ -49,15 +52,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET' && isset($_GET['fetch_footage_counts'])
         exit();
     }
 
-    $total_count = (int) $total_row['total_count'];
+    $total_count  = (int) $total_row['total_count'];
+    $distinct_ips = (int) $total_row['distinct_ips'];
 
     mysqli_free_result($total_result);
 
     // 2. Get per-status counts
     $status_query = "
-        SELECT status, COUNT(id) AS cnt
+        SELECT
+            COALESCE(NULLIF(TRIM(status), ''), 'UNKNOWN') AS status_key,
+            COUNT(id) AS cnt
         FROM `footage_availability_report`
-        GROUP BY status
+        GROUP BY status_key
         ORDER BY cnt DESC
     ";
 
@@ -80,7 +86,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET' && isset($_GET['fetch_footage_counts'])
     $status_counts = [];
 
     while ($row = mysqli_fetch_assoc($status_result)) {
-        $status_counts[$row['status']] = (int) $row['cnt'];
+        $status_counts[$row['status_key']] = (int) $row['cnt'];
     }
 
     // Check for fetch errors
@@ -100,7 +106,55 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET' && isset($_GET['fetch_footage_counts'])
 
     mysqli_free_result($status_result);
 
-    // 3. Success response
+    // 3. Get per-remark counts
+    $remark_query = "
+        SELECT
+            COALESCE(NULLIF(TRIM(remark), ''), 'NONE') AS remark_key,
+            COUNT(id) AS cnt
+        FROM `footage_availability_report`
+        GROUP BY remark_key
+        ORDER BY cnt DESC
+    ";
+
+    $remark_result = mysqli_query($con, $remark_query);
+
+    // Check remark count query error
+    if ($remark_result === false) {
+        error_log('Footage remark counts query failed: ' . mysqli_error($con));
+
+        http_response_code(500);
+
+        echo json_encode([
+            'Code'  => 500,
+            'error' => 'Failed to fetch footage remark counts.'
+        ]);
+        exit();
+    }
+
+    // Build remark_counts map
+    $remark_counts = [];
+
+    while ($row = mysqli_fetch_assoc($remark_result)) {
+        $remark_counts[$row['remark_key']] = (int) $row['cnt'];
+    }
+
+    if (mysqli_errno($con)) {
+        error_log('Footage remark counts fetch error: ' . mysqli_error($con));
+
+        mysqli_free_result($remark_result);
+
+        http_response_code(500);
+
+        echo json_encode([
+            'Code'  => 500,
+            'error' => 'An error occurred while reading footage remark counts.'
+        ]);
+        exit();
+    }
+
+    mysqli_free_result($remark_result);
+
+    // 4. Success response
     http_response_code(200);
 
     echo json_encode([
@@ -108,7 +162,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET' && isset($_GET['fetch_footage_counts'])
         'message' => 'Footage counts fetched successfully.',
         'data'    => [
             'total'         => $total_count,
-            'status_counts' => $status_counts
+            'distinct_ips'  => $distinct_ips,
+            'status_counts' => $status_counts,
+            'remark_counts' => $remark_counts
         ]
     ]);
 
@@ -127,6 +183,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET' && isset($_GET['fetch_status_types'])) 
     $status_query = "
         SELECT status, COUNT(id) AS cnt
         FROM `footage_availability_report`
+        WHERE status IS NOT NULL AND TRIM(status) != ''
         GROUP BY status
         ORDER BY cnt DESC
     ";
@@ -188,25 +245,98 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET' && isset($_GET['fetch_status_types'])) 
 
 
 // ==============================================================================
-// 3. Footage Records — Paginated List with Filters
-// URL: api/footage_api.php?page=1&limit=25&status=PRESENT&ip=...&from_date=...&to_date=...&search=...
+// 3. Footage Distinct Remark Types (for dropdown)
+// URL: api/footage_api.php?fetch_remark_types=1
+// ==============================================================================
+
+if ($_SERVER['REQUEST_METHOD'] === 'GET' && isset($_GET['fetch_remark_types'])) {
+
+    // Fetch all distinct non-empty remark values with counts
+    $remark_query = "
+        SELECT remark, COUNT(id) AS cnt
+        FROM `footage_availability_report`
+        WHERE remark IS NOT NULL AND TRIM(remark) != ''
+        GROUP BY remark
+        ORDER BY cnt DESC
+    ";
+
+    $remark_result = mysqli_query($con, $remark_query);
+
+    // Check query error
+    if ($remark_result === false) {
+        error_log('Footage remark types query failed: ' . mysqli_error($con));
+
+        http_response_code(500);
+
+        echo json_encode([
+            'Code'  => 500,
+            'error' => 'Failed to fetch footage remark types.'
+        ]);
+        exit();
+    }
+
+    // Fetch all rows
+    $data = [];
+
+    while ($row = mysqli_fetch_assoc($remark_result)) {
+        $data[] = [
+            'remark' => $row['remark'],
+            'count'  => (int) $row['cnt']
+        ];
+    }
+
+    // Check for fetch errors
+    if (mysqli_errno($con)) {
+        error_log('Footage remark types fetch error: ' . mysqli_error($con));
+
+        mysqli_free_result($remark_result);
+
+        http_response_code(500);
+
+        echo json_encode([
+            'Code'  => 500,
+            'error' => 'An error occurred while reading footage remark types.'
+        ]);
+        exit();
+    }
+
+    mysqli_free_result($remark_result);
+
+    // Success response
+    http_response_code(200);
+
+    echo json_encode([
+        'Code'        => 200,
+        'message'     => 'Footage remark types fetched successfully.',
+        'total_count' => count($data),
+        'data'        => $data
+    ]);
+
+    exit();
+}
+
+
+// ==============================================================================
+// 4. Footage Records — Paginated List with Filters
+// URL: api/footage_api.php?page=1&limit=25&status=PRESENT&remark=NA&ip=...&from_date=...&to_date=...&search=...
 // ==============================================================================
 
 if ($_SERVER['REQUEST_METHOD'] === 'GET') {
 
     // ── Input sanitization ──────────────────────────────────────────────────
     $page      = max(1, (int) ($_GET['page']   ?? 1));
-    $limit     = max(1, min(200, (int) ($_GET['limit'] ?? 25)));
+    $limit     = max(1, min(500, (int) ($_GET['limit'] ?? 25)));
     $offset    = ($page - 1) * $limit;
 
     $status    = trim($_GET['status']    ?? '');
+    $remark    = trim($_GET['remark']    ?? '');
     $ip        = trim($_GET['ip']        ?? '');
     $from_date = trim($_GET['from_date'] ?? '');
     $to_date   = trim($_GET['to_date']   ?? '');
     $search    = trim($_GET['search']    ?? '');
 
     // Whitelist sort columns to prevent SQL injection
-    $allowed_sort_cols = ['id', 'ip', 'footage_dt_from', 'footage_dt_to', 'status', 'udate'];
+    $allowed_sort_cols = ['id', 'ip', 'footage_dt_from', 'footage_dt_to', 'status', 'remark', 'udate'];
     $sort_col  = in_array($_GET['sort'] ?? '', $allowed_sort_cols, true) ? $_GET['sort'] : 'id';
     $sort_dir  = strtoupper($_GET['dir'] ?? 'DESC') === 'ASC' ? 'ASC' : 'DESC';
 
@@ -219,6 +349,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET') {
         $where_parts[] = 'status = ?';
         $bind_types   .= 's';
         $bind_vals[]   = $status;
+    }
+
+    if ($remark !== '') {
+        $where_parts[] = 'remark = ?';
+        $bind_types   .= 's';
+        $bind_vals[]   = $remark;
     }
 
     if ($ip !== '') {
@@ -240,9 +376,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET') {
     }
 
     if ($search !== '') {
-        $where_parts[] = '(ip LIKE ? OR status LIKE ?)';
-        $bind_types   .= 'ss';
+        $where_parts[] = '(ip LIKE ? OR status LIKE ? OR remark LIKE ?)';
+        $bind_types   .= 'sss';
         $like_val      = '%' . $search . '%';
+        $bind_vals[]   = $like_val;
         $bind_vals[]   = $like_val;
         $bind_vals[]   = $like_val;
     }
@@ -315,7 +452,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET') {
     }
 
     $total_count = (int) $count_row['total_count'];
-    $total_pages = $limit > 0 ? (int) ceil($total_count / $limit) : 1;
+    $total_pages = $limit > 0 ? max(1, (int) ceil($total_count / $limit)) : 1;
 
     mysqli_free_result($count_result);
     mysqli_stmt_close($count_stmt);
@@ -328,6 +465,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET') {
             footage_dt_from,
             footage_dt_to,
             status,
+            remark,
             udate
         FROM `footage_availability_report`
         $where_sql
